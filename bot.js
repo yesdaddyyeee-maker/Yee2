@@ -21,41 +21,82 @@ const userSearchResults = {};
 const userSearchMessages = {};
 
 const userAgents = [
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 14.7; rv:133.0) Gecko/20100101 Firefox/133.0',
 ];
 
 function getRandomUserAgent() {
   return userAgents[Math.floor(Math.random() * userAgents.length)];
 }
 
-function getHeaders() {
-  return {
-    'User-Agent': getRandomUserAgent(),
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.5,ar;q=0.3',
+function getHeaders(site = 'apkcombo') {
+  const ua = getRandomUserAgent();
+  const isFirefox = ua.includes('Firefox');
+  const isMac = ua.includes('Macintosh');
+  const isLinux = ua.includes('Linux');
+  
+  const baseHeaders = {
+    'User-Agent': ua,
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8',
+    'Accept-Encoding': 'gzip, deflate, br',
     'Connection': 'keep-alive',
-    'Referer': 'https://apkcombo.com/',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+    'Cache-Control': 'max-age=0',
+    'DNT': '1',
   };
+  
+  if (!isFirefox) {
+    baseHeaders['sec-ch-ua'] = '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"';
+    baseHeaders['sec-ch-ua-mobile'] = '?0';
+    if (isMac) {
+      baseHeaders['sec-ch-ua-platform'] = '"macOS"';
+    } else if (isLinux) {
+      baseHeaders['sec-ch-ua-platform'] = '"Linux"';
+    } else {
+      baseHeaders['sec-ch-ua-platform'] = '"Windows"';
+    }
+  }
+  
+  if (site === 'apkcombo') {
+    baseHeaders['Referer'] = 'https://www.google.com/';
+  } else if (site === 'uptodown') {
+    baseHeaders['Referer'] = 'https://www.google.com/';
+  } else if (site === 'apkpure') {
+    baseHeaders['Referer'] = 'https://www.google.com/';
+  }
+  
+  return baseHeaders;
 }
 
 // Retry function with exponential backoff and proxy support
 async function axiosRetry(url, config = {}, maxRetries = 3) {
   let lastError = null;
+  const site = config.site || 'apkcombo';
   
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       const axiosConfig = {
         ...config,
-        headers: getHeaders(),
+        headers: { ...getHeaders(site), ...(config.headers || {}) },
         timeout: config.timeout || 20000,
+        maxRedirects: 5,
+        validateStatus: (status) => status < 500,
       };
       
-      // On GitHub Actions, use proxy for first retry
-      if (process.env.GITHUB_ACTIONS && attempt > 0) {
-        const proxyUrl = process.env.HTTP_PROXY || process.env.http_proxy;
+      delete axiosConfig.site;
+      
+      // On GitHub Actions, use proxy if available
+      if (process.env.GITHUB_ACTIONS) {
+        const proxyUrl = process.env.HTTP_PROXY || process.env.http_proxy || process.env.HTTPS_PROXY;
         if (proxyUrl) {
           axiosConfig.httpAgent = new HttpProxyAgent(proxyUrl);
           axiosConfig.httpsAgent = new HttpsProxyAgent(proxyUrl);
@@ -63,6 +104,11 @@ async function axiosRetry(url, config = {}, maxRetries = 3) {
       }
       
       const response = await axios.get(url, axiosConfig);
+      
+      if (response.status === 403 || response.status === 429) {
+        throw new Error(`Request blocked with status ${response.status}`);
+      }
+      
       return response;
     } catch (error) {
       lastError = error;
@@ -119,11 +165,16 @@ function getMimeType(extension) {
 }
 
 async function searchApps(query) {
+  if (process.env.GITHUB_ACTIONS || process.env.CODESPACE_NAME) {
+    console.log('🔍 بيئة GitHub/Codespace - استخدام Google Play للبحث...');
+    return await searchAppsGPlay(query);
+  }
+  
   try {
     const searchUrl = `https://apkcombo.com/search/${encodeURIComponent(query)}`;
     console.log(`جاري البحث في APKCombo: ${query}`);
     
-    const response = await axiosRetry(searchUrl, { timeout: 15000 });
+    const response = await axiosRetry(searchUrl, { timeout: 15000, site: 'apkcombo' });
     const $ = cheerio.load(response.data);
     
     const results = [];
@@ -293,6 +344,7 @@ function generateDownloadLinks(appId, appName) {
   return {
     playStore: `https://play.google.com/store/apps/details?id=${appId}`,
     apkCombo: `https://apkcombo.com/${slug}/${appId}/download/apk`,
+    uptodown: `https://en.uptodown.com/android/search/${encodedName}`,
     apkPure: `https://apkpure.com/search?q=${encodedName}`,
     apkMirror: `https://www.apkmirror.com/?s=${encodedName}`
   };
@@ -517,6 +569,193 @@ async function getDownloadInfoLegacy(appId, slug) {
     console.log('[Legacy] خطأ:', error.message);
     return null;
   }
+}
+
+async function getDownloadFromUptodown(appId, appName) {
+  try {
+    console.log('[Uptodown] جاري البحث عن التطبيق...');
+    
+    const slug = appName.toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, '')
+      .replace(/\s+/g, '-')
+      .replace(/-+/g, '-')
+      .trim();
+    
+    const searchUrl = `https://en.uptodown.com/android/search/${encodeURIComponent(appName)}`;
+    
+    const response = await axiosRetry(searchUrl, { 
+      timeout: 15000,
+      site: 'uptodown'
+    });
+    
+    const $ = cheerio.load(response.data);
+    
+    let appUrl = null;
+    $('a').each((i, el) => {
+      const href = $(el).attr('href') || '';
+      if (href.includes('.uptodown.com/android') && !href.includes('/search/')) {
+        if (!appUrl) {
+          appUrl = href;
+          return false;
+        }
+      }
+    });
+    
+    if (!appUrl) {
+      console.log('[Uptodown] لم يتم العثور على التطبيق');
+      return null;
+    }
+    
+    console.log(`[Uptodown] تم العثور على: ${appUrl}`);
+    
+    const downloadPageUrl = appUrl.endsWith('/') ? 
+      appUrl + 'download' : appUrl + '/download';
+    
+    const downloadPage = await axiosRetry(downloadPageUrl, { 
+      timeout: 15000,
+      site: 'uptodown'
+    });
+    
+    const $dl = cheerio.load(downloadPage.data);
+    
+    let downloadUrl = null;
+    
+    const dataUrl = $dl('[data-url]').attr('data-url');
+    if (dataUrl) {
+      downloadUrl = dataUrl;
+    }
+    
+    if (!downloadUrl) {
+      const downloadBtn = $dl('a[href*="/download/"], button[data-url]').first();
+      downloadUrl = downloadBtn.attr('href') || downloadBtn.attr('data-url');
+    }
+    
+    if (!downloadUrl) {
+      const linkMatch = downloadPage.data.match(/https:\/\/[^"'\s]+\.apk/i);
+      if (linkMatch) {
+        downloadUrl = linkMatch[0];
+      }
+    }
+    
+    if (downloadUrl) {
+      console.log('[Uptodown] تم العثور على رابط التحميل');
+      return { url: downloadUrl, fileType: 'apk' };
+    }
+    
+    console.log('[Uptodown] لم يتم العثور على رابط التحميل');
+    return null;
+    
+  } catch (error) {
+    console.log('[Uptodown] خطأ:', error.message);
+    return null;
+  }
+}
+
+async function getDownloadFromAPKPure(appId, appName) {
+  try {
+    console.log('[APKPure] جاري البحث عن التطبيق...');
+    
+    const searchUrl = `https://apkpure.com/search?q=${encodeURIComponent(appId)}`;
+    
+    const response = await axiosRetry(searchUrl, { 
+      timeout: 15000,
+      site: 'apkpure'
+    });
+    
+    const $ = cheerio.load(response.data);
+    
+    let appUrl = null;
+    $('a[href*="/download/"]').each((i, el) => {
+      const href = $(el).attr('href') || '';
+      if (href.includes(appId) && !appUrl) {
+        appUrl = href.startsWith('http') ? href : `https://apkpure.com${href}`;
+        return false;
+      }
+    });
+    
+    if (!appUrl) {
+      $('a').each((i, el) => {
+        const href = $(el).attr('href') || '';
+        if (href.includes(appId) && href.includes('/download') && !appUrl) {
+          appUrl = href.startsWith('http') ? href : `https://apkpure.com${href}`;
+          return false;
+        }
+      });
+    }
+    
+    if (!appUrl) {
+      console.log('[APKPure] لم يتم العثور على التطبيق');
+      return null;
+    }
+    
+    console.log(`[APKPure] تم العثور على: ${appUrl}`);
+    
+    const downloadPage = await axiosRetry(appUrl, { 
+      timeout: 15000,
+      site: 'apkpure'
+    });
+    
+    const $dl = cheerio.load(downloadPage.data);
+    
+    let downloadUrl = null;
+    let fileType = 'apk';
+    
+    $dl('a[href*=".apk"], a[href*="download.apkpure"]').each((i, el) => {
+      const href = $(el).attr('href') || '';
+      if (href.includes('.apk') || href.includes('download.apkpure')) {
+        downloadUrl = href;
+        if (href.includes('.xapk')) fileType = 'xapk';
+        return false;
+      }
+    });
+    
+    if (!downloadUrl) {
+      const linkMatch = downloadPage.data.match(/https:\/\/[^"'\s]+\.(?:apk|xapk)/i);
+      if (linkMatch) {
+        downloadUrl = linkMatch[0];
+        if (downloadUrl.includes('.xapk')) fileType = 'xapk';
+      }
+    }
+    
+    if (downloadUrl) {
+      console.log(`[APKPure] تم العثور على رابط التحميل (${fileType})`);
+      return { url: downloadUrl, fileType };
+    }
+    
+    console.log('[APKPure] لم يتم العثور على رابط التحميل');
+    return null;
+    
+  } catch (error) {
+    console.log('[APKPure] خطأ:', error.message);
+    return null;
+  }
+}
+
+async function getDownloadWithFallback(appId, appName) {
+  console.log(`🔍 جاري البحث عن رابط تحميل: ${appName}`);
+  
+  let downloadInfo = await getDownloadInfo(appId, appName);
+  if (downloadInfo) {
+    console.log('✅ تم العثور على الرابط من APKCombo');
+    return downloadInfo;
+  }
+  
+  console.log('⚠️ APKCombo فشل، جاري تجربة Uptodown...');
+  downloadInfo = await getDownloadFromUptodown(appId, appName);
+  if (downloadInfo) {
+    console.log('✅ تم العثور على الرابط من Uptodown');
+    return downloadInfo;
+  }
+  
+  console.log('⚠️ Uptodown فشل، جاري تجربة APKPure...');
+  downloadInfo = await getDownloadFromAPKPure(appId, appName);
+  if (downloadInfo) {
+    console.log('✅ تم العثور على الرابط من APKPure');
+    return downloadInfo;
+  }
+  
+  console.log('❌ فشل جميع المصادر');
+  return null;
 }
 
 async function downloadAndSend(sock, sender, url, appName, version, fileType = 'apk') {
@@ -749,13 +988,13 @@ async function connectToWhatsApp() {
           }
 
           const links = generateDownloadLinks(selectedApp.appId, details.name);
-          const downloadInfo = await getDownloadInfo(selectedApp.appId, selectedApp.name);
+          const downloadInfo = await getDownloadWithFallback(selectedApp.appId, selectedApp.name);
 
           if (!downloadInfo) {
             let fallbackText = `*لم يتم العثور على رابط تحميل مباشر*\n\n`;
             fallbackText += `يمكنك تحميل التطبيق من:\n\n`;
             fallbackText += `📱 Play Store:\n${links.playStore}\n\n`;
-            fallbackText += `📦 APKCombo:\n${links.apkCombo}\n\n`;
+            fallbackText += `📦 Uptodown:\n${links.uptodown}\n\n`;
             fallbackText += `📦 APKPure:\n${links.apkPure}\n\n`;
             fallbackText += `📦 APKMirror:\n${links.apkMirror}`;
             
@@ -773,7 +1012,7 @@ async function connectToWhatsApp() {
             let fallbackText = `*فشل التحميل التلقائي*\n\n`;
             fallbackText += `يمكنك تحميل التطبيق يدوياً من:\n\n`;
             fallbackText += `📱 Play Store:\n${links.playStore}\n\n`;
-            fallbackText += `📦 APKCombo:\n${links.apkCombo}\n\n`;
+            fallbackText += `📦 Uptodown:\n${links.uptodown}\n\n`;
             fallbackText += `📦 APKPure:\n${links.apkPure}`;
             
             await sock.sendMessage(sender, { text: fallbackText });
