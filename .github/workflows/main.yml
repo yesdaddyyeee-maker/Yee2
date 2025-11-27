@@ -1,0 +1,35 @@
+name: WhatsApp Bot Runner
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-run:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm install
+
+      # Uncomment if you use environment variables
+      # - name: Setup environment
+      #   run: |
+      #     echo BOT_OWNER="YourName" >> $GITHUB_ENV
+      #     echo SESSION_ID="${{ secrets.SESSION_ID }}" >> $GITHUB_ENV
+
+      - name: Run the bot
+        run: node .
