@@ -528,13 +528,20 @@ async function connectToWhatsApp() {
   console.log(`إصدار WhatsApp: ${version.join('.')} (أحدث: ${isLatest ? 'نعم' : 'لا'})`);
 
   const phoneNumber = process.env.PHONE_NUMBER || '';
+  
+  // التحقق من وجود بيانات اعتماد محفوظة
+  const hasExistingCreds = state.creds && state.creds.me;
 
-  if (!phoneNumber) {
+  if (!phoneNumber && !hasExistingCreds) {
     console.log('═══════════════════════════════════════');
     console.log('   يرجى تعيين رقم الهاتف في PHONE_NUMBER');
     console.log('   مثال: 201234567890');
     console.log('═══════════════════════════════════════');
     return;
+  }
+  
+  if (hasExistingCreds) {
+    console.log('✓ تم العثور على بيانات اعتماد محفوظة');
   }
 
   const sock = makeWASocket({
