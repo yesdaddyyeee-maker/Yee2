@@ -1,0 +1,81 @@
+name: WhatsApp Bot
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *'
+
+jobs:
+  bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Setup Node.js 18.x
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18.x'
+        cache: 'npm'
+    
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Restore WhatsApp session
+      uses: actions/download-artifact@v3
+      with:
+        name: wa-session
+        path: auth_info/
+      continue-on-error: true
+    
+    - name: Create .env file
+      run: |
+        if [ -n "${{ secrets.PHONE_NUMBER }}" ]; then
+          echo "PHONE_NUMBER=${{ secrets.PHONE_NUMBER }}" > .env
+        else
+          echo "# PHONE_NUMBER not set, using existing credentials" > .env
+        fi
+        echo "NODE_ENV=production" >> .env
+      shell: bash
+    
+    - name: Check for credentials
+      run: |
+        if [ -d "auth_info" ] && [ -f "auth_info/creds.json" ]; then
+          echo "✓ Using existing WhatsApp credentials"
+        else
+          echo "Will use PHONE_NUMBER for new connection"
+        fi
+    
+    - name: Start WhatsApp Bot
+      env:
+        PHONE_NUMBER: ${{ secrets.PHONE_NUMBER }}
+        NODE_ENV: production
+      run: |
+        timeout 340m node bot.js || true
+    
+    - name: Save WhatsApp session
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: wa-session
+        path: auth_info/
+        retention-days: 30
+        overwrite: true
+    
+    - name: Commit and push any changes
+      if: always()
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        if git diff --quiet; then
+          echo "No changes to commit"
+        else
+          git add .
+          git commit -m "Bot session update [skip ci]" || true
+          git push origin ${{ github.ref }} || true
+        fi
