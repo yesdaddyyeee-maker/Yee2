@@ -6,6 +6,8 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import gplay from 'google-play-scraper';
+import { HttpProxyAgent } from 'http-proxy-agent';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -18,13 +20,63 @@ if (!fs.existsSync(DOWNLOADS_DIR)) {
 const userSearchResults = {};
 const userSearchMessages = {};
 
-const headers = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-  'Accept-Language': 'en-US,en;q=0.5,ar;q=0.3',
-  'Connection': 'keep-alive',
-  'Referer': 'https://apkcombo.com/',
-};
+const userAgents = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+];
+
+function getRandomUserAgent() {
+  return userAgents[Math.floor(Math.random() * userAgents.length)];
+}
+
+function getHeaders() {
+  return {
+    'User-Agent': getRandomUserAgent(),
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.5,ar;q=0.3',
+    'Connection': 'keep-alive',
+    'Referer': 'https://apkcombo.com/',
+  };
+}
+
+// Retry function with exponential backoff and proxy support
+async function axiosRetry(url, config = {}, maxRetries = 3) {
+  let lastError = null;
+  
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const axiosConfig = {
+        ...config,
+        headers: getHeaders(),
+        timeout: config.timeout || 20000,
+      };
+      
+      // On GitHub Actions, use proxy for first retry
+      if (process.env.GITHUB_ACTIONS && attempt > 0) {
+        const proxyUrl = process.env.HTTP_PROXY || process.env.http_proxy;
+        if (proxyUrl) {
+          axiosConfig.httpAgent = new HttpProxyAgent(proxyUrl);
+          axiosConfig.httpsAgent = new HttpsProxyAgent(proxyUrl);
+        }
+      }
+      
+      const response = await axios.get(url, axiosConfig);
+      return response;
+    } catch (error) {
+      lastError = error;
+      
+      if (attempt < maxRetries) {
+        const delay = Math.min(1000 * Math.pow(2, attempt), 10000);
+        console.log(`⏳ إعادة محاولة (${attempt + 1}/${maxRetries}) بعد ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  }
+  
+  throw lastError;
+}
 
 const numberEmojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
 
@@ -71,7 +123,7 @@ async function searchApps(query) {
     const searchUrl = `https://apkcombo.com/search/${encodeURIComponent(query)}`;
     console.log(`جاري البحث في APKCombo: ${query}`);
     
-    const response = await axios.get(searchUrl, { headers, timeout: 15000 });
+    const response = await axiosRetry(searchUrl, { timeout: 15000 });
     const $ = cheerio.load(response.data);
     
     const results = [];
@@ -194,7 +246,7 @@ async function getAppDetails(appId) {
 async function findApkComboSlug(appId, appName) {
   try {
     const searchUrl = `https://apkcombo.com/search/${encodeURIComponent(appName)}`;
-    const response = await axios.get(searchUrl, { headers, timeout: 15000 });
+    const response = await axiosRetry(searchUrl, { timeout: 15000 });
     const $ = cheerio.load(response.data);
 
     let slug = null;
@@ -259,7 +311,7 @@ async function getDownloadInfo(appId, appName) {
     const pageUrl = `https://apkcombo.com/${slug}/${appId}/download/apk`;
     console.log(`جاري فتح صفحة: ${pageUrl}`);
     
-    const pageResponse = await axios.get(pageUrl, { headers, timeout: 20000 });
+    const pageResponse = await axiosRetry(pageUrl, { timeout: 20000 });
     const $ = cheerio.load(pageResponse.data);
 
     let downloadUrl = null;
@@ -317,7 +369,7 @@ async function getDownloadInfoAlt(appId, slug) {
     for (const pageUrl of altUrls) {
       try {
         console.log(`جاري تجربة: ${pageUrl}`);
-        const pageResponse = await axios.get(pageUrl, { headers, timeout: 20000 });
+        const pageResponse = await axiosRetry(pageUrl, { timeout: 20000 });
         const $ = cheerio.load(pageResponse.data);
 
         let downloadUrl = null;
@@ -365,7 +417,7 @@ async function getDownloadInfoLegacy(appId, slug) {
     const pageUrl = `https://apkcombo.com/${slug}/${appId}/download/phone-latest-apk`;
     console.log(`[Legacy] جاري فتح: ${pageUrl}`);
     
-    const pageResponse = await axios.get(pageUrl, { headers, timeout: 20000 });
+    const pageResponse = await axiosRetry(pageUrl, { timeout: 20000 });
     
     const xidMatch = pageResponse.data.match(/xid\s*=\s*["']([^"']+)["']/);
     if (!xidMatch) {
@@ -377,8 +429,7 @@ async function getDownloadInfoLegacy(appId, slug) {
 
     let token = '';
     try {
-      const tokenResponse = await axios.get('https://apkcombo.com/checkin', { 
-        headers, 
+      const tokenResponse = await axiosRetry('https://apkcombo.com/checkin', { 
         timeout: 10000 
       });
       token = tokenResponse.data;
@@ -395,7 +446,7 @@ async function getDownloadInfoLegacy(appId, slug) {
     formData.append('version', '');
 
     const dlResponse = await axios.post(dlUrl, formData, {
-      headers: { ...headers, 'Content-Type': 'application/x-www-form-urlencoded' },
+      headers: { ...getHeaders(), 'Content-Type': 'application/x-www-form-urlencoded' },
       timeout: 20000
     });
 
@@ -428,7 +479,7 @@ async function getDownloadInfoLegacy(appId, slug) {
     
     try {
       const finalResponse = await axios.get(finalUrl, {
-        headers,
+        headers: getHeaders(),
         maxRedirects: 0,
         validateStatus: (status) => status === 302 || status === 301 || status === 200
       });
