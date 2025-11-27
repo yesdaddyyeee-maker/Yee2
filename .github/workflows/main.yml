@@ -1,0 +1,28 @@
+
+name: Deploy WhatsApp Bot
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '20'
+        
+    - name: Install dependencies
+      run: npm install
+      
+    - name: Run WhatsApp Bot
+      env:
+        PHONE_NUMBER: ${{ secrets.PHONE_NUMBER }}
+      run: node bot.js
