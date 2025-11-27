@@ -1,0 +1,84 @@
+name: WhatsApp Bot
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *'
+
+permissions:
+  contents: write
+
+jobs:
+  bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Setup Node.js 20.x
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20.x'
+        cache: 'npm'
+    
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Restore WhatsApp session
+      uses: dawidd6/action-download-artifact@v6
+      with:
+        name: wa-session
+        path: auth_info/
+        workflow_conclusion: success
+        if_no_artifact_found: warn
+      continue-on-error: true
+    
+    - name: Check for credentials
+      run: |
+        echo "═══════════════════════════════════════"
+        echo "   WhatsApp Bot - GitHub Actions"
+        echo "═══════════════════════════════════════"
+        if [ -d "auth_info" ] && [ -f "auth_info/creds.json" ]; then
+          echo "✓ Found existing WhatsApp credentials"
+        else
+          echo "⚠ No credentials found - will use PHONE_NUMBER"
+        fi
+        echo ""
+        echo "Search: Google Play API (optimized for GitHub)"
+        echo "Downloads: APKCombo → Uptodown → APKPure"
+        echo "═══════════════════════════════════════"
+    
+    - name: Start WhatsApp Bot
+      env:
+        PHONE_NUMBER: ${{ secrets.PHONE_NUMBER }}
+        GITHUB_ACTIONS: true
+        NODE_ENV: production
+      run: |
+        timeout 350m node bot.js || true
+    
+    - name: Save WhatsApp session
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: wa-session
+        path: auth_info/
+        retention-days: 30
+        overwrite: true
+    
+    - name: Commit session updates
+      if: always()
+      run: |
+        git config --local user.email "github-actions[bot]@users.noreply.github.com"
+        git config --local user.name "github-actions[bot]"
+        git add auth_info/ 2>/dev/null || true
+        if git diff --staged --quiet; then
+          echo "No session changes to commit"
+        else
+          git commit -m "Update WhatsApp session [skip ci]" || true
+          git push origin HEAD || true
+        fi
+      continue-on-error: true
