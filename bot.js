@@ -1,0 +1,771 @@
+import makeWASocket, { useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
+import pino from 'pino';
+import axios from 'axios';
+import * as cheerio from 'cheerio';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import gplay from 'google-play-scraper';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const DOWNLOADS_DIR = './downloads';
+if (!fs.existsSync(DOWNLOADS_DIR)) {
+  fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
+}
+
+const userSearchResults = {};
+const userSearchMessages = {};
+
+const headers = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+  'Accept-Language': 'en-US,en;q=0.5,ar;q=0.3',
+  'Connection': 'keep-alive',
+  'Referer': 'https://apkcombo.com/',
+};
+
+const numberEmojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
+
+const emojiToNumber = {
+  '1️⃣': 1, '2️⃣': 2, '3️⃣': 3, '4️⃣': 4, '5️⃣': 5,
+  '6️⃣': 6, '7️⃣': 7, '8️⃣': 8, '9️⃣': 9, '🔟': 10,
+  '١': 1, '٢': 2, '٣': 3, '٤': 4, '٥': 5,
+  '٦': 6, '٧': 7, '٨': 8, '٩': 9, '١٠': 10
+};
+
+function parseNumber(text) {
+  const trimmed = text.trim();
+  if (emojiToNumber[trimmed]) {
+    return emojiToNumber[trimmed];
+  }
+  const numMatch = trimmed.match(/^(\d+)$/);
+  if (numMatch) {
+    return parseInt(numMatch[1]);
+  }
+  return null;
+}
+
+function getFileExtension(url, contentType) {
+  if (url.includes('.xapk') || url.includes('xapk-package') || contentType?.includes('xapk')) return 'xapk';
+  if (url.includes('.apks') || contentType?.includes('apks')) return 'apks';
+  if (url.includes('.apkm') || contentType?.includes('apkm')) return 'apkm';
+  if (url.includes('.obb')) return 'obb';
+  return 'apk';
+}
+
+function getMimeType(extension) {
+  const mimes = {
+    'apk': 'application/vnd.android.package-archive',
+    'xapk': 'application/vnd.android.package-archive',
+    'apks': 'application/vnd.android.package-archive',
+    'apkm': 'application/vnd.android.package-archive',
+    'obb': 'application/octet-stream'
+  };
+  return mimes[extension] || 'application/octet-stream';
+}
+
+async function searchApps(query) {
+  try {
+    const searchUrl = `https://apkcombo.com/search/${encodeURIComponent(query)}`;
+    console.log(`جاري البحث في APKCombo: ${query}`);
+    
+    const response = await axios.get(searchUrl, { headers, timeout: 15000 });
+    const $ = cheerio.load(response.data);
+    
+    const results = [];
+    
+    $('a').each((i, el) => {
+      if (results.length >= 10) return false;
+      
+      const href = $(el).attr('href') || '';
+      const title = $(el).attr('title') || $(el).text().trim();
+      
+      if (href.match(/^\/[^\/]+\/[a-z][a-z0-9_]*\.[a-z][a-z0-9_.]*\/?$/i)) {
+        const parts = href.split('/').filter(p => p);
+        if (parts.length >= 2) {
+          const appId = parts[1];
+          const name = title.replace(' APK', '').trim() || parts[0].replace(/-/g, ' ');
+          
+          if (!results.find(r => r.appId === appId) && name) {
+            results.push({
+              name: name.substring(0, 80),
+              appId: appId,
+              icon: '',
+              developer: '',
+              score: 0,
+              url: `https://apkcombo.com${href}`
+            });
+          }
+        }
+      }
+    });
+
+    if (results.length === 0) {
+      console.log('لم يتم العثور على نتائج في APKCombo، جاري البحث في Play Store...');
+      return await searchAppsGPlay(query);
+    }
+
+    console.log(`تم العثور على ${results.length} نتيجة من APKCombo`);
+    return results;
+  } catch (error) {
+    console.log('خطأ في البحث APKCombo:', error.message);
+    return await searchAppsGPlay(query);
+  }
+}
+
+async function searchAppsGPlay(query) {
+  try {
+    const results = await gplay.search({
+      term: query,
+      num: 10,
+      lang: 'ar',
+      country: 'eg'
+    });
+
+    return results.map(app => ({
+      name: app.title.substring(0, 80),
+      appId: app.appId,
+      icon: app.icon,
+      developer: app.developer,
+      score: app.score,
+      url: app.url
+    }));
+  } catch (error) {
+    try {
+      const results = await gplay.search({
+        term: query,
+        num: 10,
+        lang: 'en',
+        country: 'us'
+      });
+
+      return results.map(app => ({
+        name: app.title.substring(0, 80),
+        appId: app.appId,
+        icon: app.icon,
+        developer: app.developer,
+        score: app.score,
+        url: app.url
+      }));
+    } catch (err) {
+      throw new Error(`فشل البحث: ${err.message}`);
+    }
+  }
+}
+
+async function getAppDetails(appId) {
+  try {
+    const app = await gplay.app({ appId, lang: 'ar', country: 'eg' });
+
+    return {
+      name: app.title,
+      appId: app.appId,
+      version: app.version || 'غير معروف',
+      size: app.size || 'غير معروف',
+      developer: app.developer,
+      icon: app.icon,
+      description: app.summary || '',
+      installs: app.installs || '',
+      score: app.score || 0
+    };
+  } catch (error) {
+    try {
+      const app = await gplay.app({ appId, lang: 'en', country: 'us' });
+
+      return {
+        name: app.title,
+        appId: app.appId,
+        version: app.version || 'Unknown',
+        size: app.size || 'Unknown',
+        developer: app.developer,
+        icon: app.icon,
+        description: app.summary || '',
+        installs: app.installs || '',
+        score: app.score || 0
+      };
+    } catch (err) {
+      throw new Error(`فشل جلب معلومات التطبيق: ${err.message}`);
+    }
+  }
+}
+
+async function findApkComboSlug(appId, appName) {
+  try {
+    const searchUrl = `https://apkcombo.com/search/${encodeURIComponent(appName)}`;
+    const response = await axios.get(searchUrl, { headers, timeout: 15000 });
+    const $ = cheerio.load(response.data);
+
+    let slug = null;
+
+    $('a[title$=" APK"]').each((i, el) => {
+      const href = $(el).attr('href');
+      if (href && href.includes(appId)) {
+        const match = href.match(/\/([^\/]+)\/([^\/]+)\/?$/);
+        if (match && match[2] === appId) {
+          slug = match[1];
+          return false;
+        }
+      }
+    });
+
+    if (!slug) {
+      const slugFromName = appName.toLowerCase()
+        .replace(/[^a-z0-9\s-]/g, '')
+        .replace(/\s+/g, '-')
+        .replace(/-+/g, '-')
+        .trim();
+      slug = slugFromName;
+    }
+
+    return slug;
+  } catch (error) {
+    const slugFromName = appName.toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, '')
+      .replace(/\s+/g, '-')
+      .replace(/-+/g, '-')
+      .trim();
+    return slugFromName;
+  }
+}
+
+function generateDownloadLinks(appId, appName) {
+  const encodedName = encodeURIComponent(appName);
+  const slug = appName.toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, '')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .trim();
+  
+  return {
+    playStore: `https://play.google.com/store/apps/details?id=${appId}`,
+    apkCombo: `https://apkcombo.com/${slug}/${appId}/download/apk`,
+    apkPure: `https://apkpure.com/search?q=${encodedName}`,
+    apkMirror: `https://www.apkmirror.com/?s=${encodedName}`
+  };
+}
+
+async function getDownloadInfo(appId, appName) {
+  try {
+    console.log(`جاري جلب رابط التحميل لـ: ${appName}`);
+
+    const slug = appName.toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, '')
+      .replace(/\s+/g, '-')
+      .replace(/-+/g, '-')
+      .trim();
+
+    const pageUrl = `https://apkcombo.com/${slug}/${appId}/download/apk`;
+    console.log(`جاري فتح صفحة: ${pageUrl}`);
+    
+    const pageResponse = await axios.get(pageUrl, { headers, timeout: 20000 });
+    const $ = cheerio.load(pageResponse.data);
+
+    let downloadUrl = null;
+    let fileType = 'apk';
+
+    $('a').each((i, el) => {
+      const href = $(el).attr('href') || '';
+      if (href.includes('/r2?u=') && !downloadUrl) {
+        const encodedUrl = href.split('/r2?u=')[1];
+        if (encodedUrl) {
+          downloadUrl = decodeURIComponent(encodedUrl);
+          
+          if (downloadUrl.includes('.xapk') || downloadUrl.includes('xapk-package')) {
+            fileType = 'xapk';
+          } else if (downloadUrl.includes('.apks')) {
+            fileType = 'apks';
+          }
+          
+          console.log(`تم العثور على رابط R2 CDN (${fileType})`);
+          return false;
+        }
+      }
+    });
+
+    if (!downloadUrl) {
+      const r2Match = pageResponse.data.match(/\/r2\?u=([^"'\s]+)/);
+      if (r2Match) {
+        downloadUrl = decodeURIComponent(r2Match[1]);
+        if (downloadUrl.includes('.xapk')) fileType = 'xapk';
+        else if (downloadUrl.includes('.apks')) fileType = 'apks';
+        console.log(`تم العثور على رابط R2 CDN من regex (${fileType})`);
+      }
+    }
+
+    if (downloadUrl) {
+      return { url: downloadUrl, fileType };
+    }
+
+    console.log('لم يتم العثور على رابط R2، جاري تجربة الطريقة البديلة...');
+    return await getDownloadInfoAlt(appId, slug);
+
+  } catch (error) {
+    console.log('خطأ في جلب رابط التحميل:', error.message);
+    return null;
+  }
+}
+
+async function getDownloadInfoAlt(appId, slug) {
+  try {
+    const altUrls = [
+      `https://apkcombo.com/${slug}/${appId}/download/phone-apk`,
+      `https://apkcombo.com/${slug}/${appId}/download/phone-latest-apk`,
+    ];
+
+    for (const pageUrl of altUrls) {
+      try {
+        console.log(`جاري تجربة: ${pageUrl}`);
+        const pageResponse = await axios.get(pageUrl, { headers, timeout: 20000 });
+        const $ = cheerio.load(pageResponse.data);
+
+        let downloadUrl = null;
+        let fileType = 'apk';
+
+        $('a[href*="/r2?u="]').each((i, el) => {
+          const href = $(el).attr('href') || '';
+          const encodedUrl = href.split('/r2?u=')[1];
+          if (encodedUrl && !downloadUrl) {
+            downloadUrl = decodeURIComponent(encodedUrl);
+            if (downloadUrl.includes('.xapk')) fileType = 'xapk';
+            else if (downloadUrl.includes('.apks')) fileType = 'apks';
+            return false;
+          }
+        });
+
+        if (!downloadUrl) {
+          const r2Match = pageResponse.data.match(/\/r2\?u=([^"'\s&]+)/);
+          if (r2Match) {
+            downloadUrl = decodeURIComponent(r2Match[1]);
+            if (downloadUrl.includes('.xapk')) fileType = 'xapk';
+            else if (downloadUrl.includes('.apks')) fileType = 'apks';
+          }
+        }
+
+        if (downloadUrl) {
+          console.log(`تم العثور على رابط CDN (${fileType})`);
+          return { url: downloadUrl, fileType };
+        }
+      } catch (e) {
+        continue;
+      }
+    }
+
+    console.log('لم يتم العثور على R2، جاري تجربة طريقة API القديمة...');
+    return await getDownloadInfoLegacy(appId, slug);
+  } catch (error) {
+    console.log('خطأ في الطريقة البديلة:', error.message);
+    return null;
+  }
+}
+
+async function getDownloadInfoLegacy(appId, slug) {
+  try {
+    const pageUrl = `https://apkcombo.com/${slug}/${appId}/download/phone-latest-apk`;
+    console.log(`[Legacy] جاري فتح: ${pageUrl}`);
+    
+    const pageResponse = await axios.get(pageUrl, { headers, timeout: 20000 });
+    
+    const xidMatch = pageResponse.data.match(/xid\s*=\s*["']([^"']+)["']/);
+    if (!xidMatch) {
+      console.log('[Legacy] لم يتم العثور على xid');
+      return null;
+    }
+    const xid = xidMatch[1];
+    console.log(`[Legacy] XID: ${xid}`);
+
+    let token = '';
+    try {
+      const tokenResponse = await axios.get('https://apkcombo.com/checkin', { 
+        headers, 
+        timeout: 10000 
+      });
+      token = tokenResponse.data;
+      console.log('[Legacy] تم الحصول على التوكن');
+    } catch (e) {
+      console.log('[Legacy] فشل جلب التوكن، متابعة بدونه');
+    }
+
+    const dlUrl = `https://apkcombo.com/${slug}/${appId}/${xid}/dl`;
+    console.log(`[Legacy] جاري طلب: ${dlUrl}`);
+    
+    const formData = new URLSearchParams();
+    formData.append('package_name', appId);
+    formData.append('version', '');
+
+    const dlResponse = await axios.post(dlUrl, formData, {
+      headers: { ...headers, 'Content-Type': 'application/x-www-form-urlencoded' },
+      timeout: 20000
+    });
+
+    let downloadMatch = dlResponse.data.match(/href=["'](https:\/\/apkcombo\.com\/d\?u=[^"']+)["']/);
+    if (!downloadMatch) {
+      downloadMatch = dlResponse.data.match(/href=["']([^"']*\/d\?u=[^"']+)["']/);
+    }
+    
+    if (!downloadMatch) {
+      const r2Match = dlResponse.data.match(/\/r2\?u=([^"'\s&]+)/);
+      if (r2Match) {
+        const downloadUrl = decodeURIComponent(r2Match[1]);
+        let fileType = 'apk';
+        if (downloadUrl.includes('.xapk')) fileType = 'xapk';
+        else if (downloadUrl.includes('.apks')) fileType = 'apks';
+        console.log(`[Legacy] تم العثور على R2 من dl (${fileType})`);
+        return { url: downloadUrl, fileType };
+      }
+      console.log('[Legacy] لم يتم العثور على رابط التحميل');
+      return null;
+    }
+
+    let downloadLink = downloadMatch[1];
+    if (!downloadLink.startsWith('http')) {
+      downloadLink = 'https://apkcombo.com' + downloadLink;
+    }
+    console.log('[Legacy] تم العثور على رابط التحميل');
+
+    const finalUrl = token ? downloadLink + '&' + token : downloadLink;
+    
+    try {
+      const finalResponse = await axios.get(finalUrl, {
+        headers,
+        maxRedirects: 0,
+        validateStatus: (status) => status === 302 || status === 301 || status === 200
+      });
+
+      const redirectUrl = finalResponse.headers.location;
+      if (redirectUrl) {
+        console.log('[Legacy] تم الحصول على رابط CDN');
+        let fileType = 'apk';
+        if (redirectUrl.includes('/XAPK/') || redirectUrl.includes('.xapk')) {
+          fileType = 'xapk';
+        } else if (redirectUrl.includes('/APKS/') || redirectUrl.includes('.apks')) {
+          fileType = 'apks';
+        }
+        return { url: redirectUrl, fileType };
+      }
+      
+      if (finalResponse.data) {
+        const cdnMatch = finalResponse.data.match(/https:\/\/[^"'\s]+\.(?:apk|xapk|apks)/i);
+        if (cdnMatch) {
+          let fileType = 'apk';
+          if (cdnMatch[0].includes('.xapk')) fileType = 'xapk';
+          else if (cdnMatch[0].includes('.apks')) fileType = 'apks';
+          console.log(`[Legacy] تم استخراج رابط CDN (${fileType})`);
+          return { url: cdnMatch[0], fileType };
+        }
+      }
+    } catch (e) {
+      console.log('[Legacy] خطأ في التحويل:', e.message);
+    }
+
+    console.log('[Legacy] لم يتم العثور على الرابط النهائي');
+    return null;
+
+  } catch (error) {
+    console.log('[Legacy] خطأ:', error.message);
+    return null;
+  }
+}
+
+async function downloadAndSend(sock, sender, url, appName, version, fileType = 'apk') {
+  const cleanName = appName
+    .replace(/[<>:"/\\|?*]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const actualFileType = getFileExtension(url, null) || fileType;
+  const displayName = `${cleanName}_${version}.${actualFileType}`;
+
+  console.log(`جاري إرسال: ${displayName}`);
+
+  try {
+    await sock.sendMessage(sender, {
+      document: { url: url },
+      fileName: displayName,
+      mimetype: getMimeType(actualFileType)
+    });
+
+    console.log(`تم الإرسال: ${displayName}`);
+
+    await sock.sendMessage(sender, {
+      text: '📱 تابعني على انستجرام من فضلك\nhttps://www.instagram.com/omarxarafp'
+    });
+
+    return {
+      success: true,
+      fileName: displayName,
+      fileType: actualFileType
+    };
+  } catch (sendErr) {
+    throw new Error(`خطأ في الإرسال: ${sendErr.message}`);
+  }
+}
+
+let retryCount = 0;
+const MAX_RETRIES = 5;
+let pairingCodeRequested = false;
+
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+const randomDelay = () => delay(1000 + Math.random() * 2000);
+
+async function sendMessageSafely(sock, jid, content, options = {}) {
+  try {
+    await sock.sendPresenceUpdate('composing', jid);
+    await delay(500 + Math.random() * 1000);
+    const result = await sock.sendMessage(jid, content, options);
+    await sock.sendPresenceUpdate('unavailable', jid);
+    return result;
+  } catch (e) {
+    return await sock.sendMessage(jid, content, options);
+  }
+}
+
+async function connectToWhatsApp() {
+  const { state, saveCreds } = await useMultiFileAuthState('auth_info');
+  const { version, isLatest } = await fetchLatestBaileysVersion();
+
+  console.log(`إصدار WhatsApp: ${version.join('.')} (أحدث: ${isLatest ? 'نعم' : 'لا'})`);
+
+  const phoneNumber = process.env.PHONE_NUMBER || '';
+
+  if (!phoneNumber) {
+    console.log('═══════════════════════════════════════');
+    console.log('   يرجى تعيين رقم الهاتف في PHONE_NUMBER');
+    console.log('   مثال: 201234567890');
+    console.log('═══════════════════════════════════════');
+    return;
+  }
+
+  const sock = makeWASocket({
+    auth: state,
+    version,
+    printQRInTerminal: false,
+    logger: pino({ level: 'silent' }),
+    browser: ['Ubuntu', 'Chrome', '120.0.0.0'],
+    connectTimeoutMs: 60000,
+    defaultQueryTimeoutMs: 60000,
+    keepAliveIntervalMs: 25000,
+    syncFullHistory: false,
+    markOnlineOnConnect: false,
+    emitOwnEvents: false
+  });
+
+  sock.ev.on('creds.update', saveCreds);
+
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect, qr } = update;
+
+    if (connection === 'connecting') {
+      console.log('جاري الاتصال بـ WhatsApp...');
+    }
+
+    if (qr && !pairingCodeRequested && !sock.authState.creds.registered) {
+      pairingCodeRequested = true;
+      try {
+        console.log('جاري طلب رمز الاقتران...');
+        const code = await sock.requestPairingCode(phoneNumber);
+        const displayCode = code?.match(/.{1,4}/g)?.join('-') || code;
+        console.log('═══════════════════════════════════════');
+        console.log('   رمز الاقتران: ' + displayCode);
+        console.log('');
+        console.log('   خطوات الربط:');
+        console.log('   1. افتح WhatsApp');
+        console.log('   2. الإعدادات > الأجهزة المرتبطة');
+        console.log('   3. ربط جهاز > الربط برقم الهاتف');
+        console.log('   4. أدخل الرمز أعلاه');
+        console.log('═══════════════════════════════════════');
+      } catch (error) {
+        console.log('خطأ في طلب رمز الاقتران:', error.message);
+        pairingCodeRequested = false;
+      }
+    }
+
+    if (connection === 'close') {
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+
+      console.log('انقطع الاتصال - الكود:', statusCode || 'غير معروف');
+      pairingCodeRequested = false;
+
+      if (shouldReconnect && retryCount < MAX_RETRIES) {
+        retryCount++;
+        const delay = retryCount * 10000;
+        console.log(`إعادة الاتصال (${retryCount}/${MAX_RETRIES}) بعد ${delay/1000} ثانية...`);
+        setTimeout(() => connectToWhatsApp(), delay);
+      } else if (retryCount >= MAX_RETRIES) {
+        console.log('تم تجاوز الحد الأقصى للمحاولات.');
+      } else {
+        console.log('تم تسجيل الخروج. احذف مجلد auth_info وأعد التشغيل.');
+      }
+    } else if (connection === 'open') {
+      retryCount = 0;
+      pairingCodeRequested = false;
+      console.log('═══════════════════════════════════════');
+      console.log('   تم الاتصال بـ WhatsApp بنجاح!');
+      console.log('   البوت جاهز للعمل (وضع غير متصل)');
+      console.log('═══════════════════════════════════════');
+      
+      // Set presence to offline/unavailable
+      await sock.sendPresenceUpdate('unavailable');
+    }
+  });
+
+  sock.ev.on('call', async (calls) => {
+    for (const call of calls) {
+      const callerId = call.from;
+      const phoneNum = callerId.split('@')[0];
+
+      if (call.status === 'offer') {
+        console.log(`═══════════════════════════════════════`);
+        console.log(`   مكالمة واردة من: ${phoneNum}`);
+        console.log(`   جاري حظر المستخدم...`);
+        console.log(`═══════════════════════════════════════`);
+
+        try {
+          await sock.updateBlockStatus(callerId, 'block');
+          console.log(`✓ تم حظر ${phoneNum} بنجاح`);
+        } catch (error) {
+          console.log(`✗ خطأ في حظر ${phoneNum}:`, error.message);
+        }
+      }
+    }
+  });
+
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return;
+
+    for (const msg of messages) {
+      const sender = msg.key.remoteJid;
+      const text = (msg.message?.conversation || 
+                   msg.message?.extendedTextMessage?.text || '').trim();
+
+      if (!text) continue;
+
+      console.log(`رسالة من ${sender}: ${text}`);
+
+      const selectedNumber = parseNumber(text);
+
+      if (selectedNumber && userSearchResults[sender]) {
+        const selectedIndex = selectedNumber - 1;
+        const apps = userSearchResults[sender];
+
+        if (selectedIndex < 0 || selectedIndex >= apps.length) {
+          await sock.sendMessage(sender, { react: { text: '❌', key: msg.key } });
+          continue;
+        }
+
+        await sock.sendMessage(sender, { react: { text: '⏳', key: msg.key } });
+
+        if (userSearchMessages[sender]) {
+          try {
+            await sock.sendMessage(sender, { delete: userSearchMessages[sender] });
+          } catch (e) {}
+          delete userSearchMessages[sender];
+        }
+
+        const selectedApp = apps[selectedIndex];
+
+        try {
+          const details = await getAppDetails(selectedApp.appId);
+
+          let infoText = `*${details.name}*\n\n`;
+          infoText += `Package: \`${details.appId}\`\n`;
+          infoText += `Version: ${details.version}\n`;
+          infoText += `Size: ${details.size}\n`;
+          infoText += `Developer: ${details.developer}\n`;
+          infoText += `Rating: ${details.score ? details.score.toFixed(1) + '/5' : 'N/A'}\n`;
+          infoText += `Downloads: ${details.installs}`;
+
+          if (details.icon) {
+            try {
+              await sock.sendMessage(sender, {
+                image: { url: details.icon },
+                caption: infoText
+              });
+            } catch (imgErr) {
+              await sock.sendMessage(sender, { text: infoText });
+            }
+          } else {
+            await sock.sendMessage(sender, { text: infoText });
+          }
+
+          const links = generateDownloadLinks(selectedApp.appId, details.name);
+          const downloadInfo = await getDownloadInfo(selectedApp.appId, selectedApp.name);
+
+          if (!downloadInfo) {
+            let fallbackText = `*لم يتم العثور على رابط تحميل مباشر*\n\n`;
+            fallbackText += `يمكنك تحميل التطبيق من:\n\n`;
+            fallbackText += `📱 Play Store:\n${links.playStore}\n\n`;
+            fallbackText += `📦 APKCombo:\n${links.apkCombo}\n\n`;
+            fallbackText += `📦 APKPure:\n${links.apkPure}\n\n`;
+            fallbackText += `📦 APKMirror:\n${links.apkMirror}`;
+            
+            await sock.sendMessage(sender, { text: fallbackText });
+            delete userSearchResults[sender];
+            continue;
+          }
+
+          try {
+            await downloadAndSend(sock, sender, downloadInfo.url, details.name, details.version, downloadInfo.fileType);
+            delete userSearchResults[sender];
+          } catch (dlError) {
+            console.log('خطأ في التحميل:', dlError.message);
+            
+            let fallbackText = `*فشل التحميل التلقائي*\n\n`;
+            fallbackText += `يمكنك تحميل التطبيق يدوياً من:\n\n`;
+            fallbackText += `📱 Play Store:\n${links.playStore}\n\n`;
+            fallbackText += `📦 APKCombo:\n${links.apkCombo}\n\n`;
+            fallbackText += `📦 APKPure:\n${links.apkPure}`;
+            
+            await sock.sendMessage(sender, { text: fallbackText });
+          }
+
+        } catch (error) {
+          console.log('خطأ في جلب المعلومات:', error.message);
+          await sock.sendMessage(sender, { react: { text: '❌', key: msg.key } });
+        }
+      } else {
+        const query = text;
+
+        await sock.sendMessage(sender, { react: { text: '🔍', key: msg.key } });
+
+        try {
+          const apps = await searchApps(query);
+
+          if (apps.length === 0) {
+            await sock.sendMessage(sender, { react: { text: '❌', key: msg.key } });
+            continue;
+          }
+
+          userSearchResults[sender] = apps;
+
+          let resultText = '';
+          apps.forEach((app, index) => {
+            resultText += `${numberEmojis[index]} ${app.name}\n`;
+          });
+          resultText += '\n✏️ *اكتب الرقم لتحميل التطبيق*';
+
+          const sentMsg = await sock.sendMessage(sender, {
+            image: { url: 'https://i.postimg.cc/L9g2BjwB/profile.jpg' },
+            caption: resultText.trim()
+          });
+          userSearchMessages[sender] = sentMsg.key;
+
+          await sock.sendMessage(sender, { react: { text: '✅', key: msg.key } });
+
+        } catch (error) {
+          console.log('خطأ في البحث:', error.message);
+          await sock.sendMessage(sender, { react: { text: '❌', key: msg.key } });
+        }
+      }
+    }
+  });
+}
+
+console.log('═══════════════════════════════════════');
+console.log('   OMARDEV WhatsApp Bot - APKCombo');
+console.log('   يدعم: APK, XAPK, APKS, APKM, OBB');
+console.log('═══════════════════════════════════════');
+
+connectToWhatsApp();
