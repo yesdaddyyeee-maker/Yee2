@@ -575,12 +575,6 @@ async function getDownloadFromUptodown(appId, appName) {
   try {
     console.log('[Uptodown] جاري البحث عن التطبيق...');
     
-    const slug = appName.toLowerCase()
-      .replace(/[^a-z0-9\s-]/g, '')
-      .replace(/\s+/g, '-')
-      .replace(/-+/g, '-')
-      .trim();
-    
     const searchUrl = `https://en.uptodown.com/android/search/${encodeURIComponent(appName)}`;
     
     const response = await axiosRetry(searchUrl, { 
@@ -591,15 +585,42 @@ async function getDownloadFromUptodown(appId, appName) {
     const $ = cheerio.load(response.data);
     
     let appUrl = null;
-    $('a').each((i, el) => {
+    const searchTermLower = appName.toLowerCase();
+    
+    $('div.item a, article a, .app a').each((i, el) => {
       const href = $(el).attr('href') || '';
-      if (href.includes('.uptodown.com/android') && !href.includes('/search/')) {
-        if (!appUrl) {
-          appUrl = href;
-          return false;
+      const title = $(el).text().toLowerCase();
+      const parentTitle = $(el).parent().text().toLowerCase();
+      
+      if (href.includes('.uptodown.com/android') && 
+          !href.includes('/search/') && 
+          !href.includes('uptodown-android')) {
+        
+        if (title.includes(searchTermLower.split(' ')[0]) || 
+            parentTitle.includes(searchTermLower.split(' ')[0]) ||
+            href.includes(searchTermLower.replace(/\s+/g, '-'))) {
+          if (!appUrl) {
+            appUrl = href;
+            return false;
+          }
         }
       }
     });
+    
+    if (!appUrl) {
+      $('a[href*=".uptodown.com/android"]').each((i, el) => {
+        const href = $(el).attr('href') || '';
+        if (!href.includes('/search/') && 
+            !href.includes('uptodown-android') &&
+            !href.includes('en.uptodown.com/android"') &&
+            href.match(/[a-z]+-[a-z]+\.en\.uptodown\.com|en\.uptodown\.com\/android\/[^\/]+$/)) {
+          if (!appUrl) {
+            appUrl = href;
+            return false;
+          }
+        }
+      });
+    }
     
     if (!appUrl) {
       console.log('[Uptodown] لم يتم العثور على التطبيق');
@@ -621,23 +642,37 @@ async function getDownloadFromUptodown(appId, appName) {
     let downloadUrl = null;
     
     const dataUrl = $dl('[data-url]').attr('data-url');
-    if (dataUrl) {
+    if (dataUrl && dataUrl.startsWith('http')) {
       downloadUrl = dataUrl;
     }
     
     if (!downloadUrl) {
-      const downloadBtn = $dl('a[href*="/download/"], button[data-url]').first();
-      downloadUrl = downloadBtn.attr('href') || downloadBtn.attr('data-url');
+      $dl('a.button, a.download, button[data-url], a[href*="download"]').each((i, el) => {
+        const href = $dl(el).attr('href') || $dl(el).attr('data-url') || '';
+        if (href.startsWith('http') && (href.includes('.apk') || href.includes('/post-download/'))) {
+          if (!downloadUrl) {
+            downloadUrl = href;
+            return false;
+          }
+        }
+      });
     }
     
     if (!downloadUrl) {
-      const linkMatch = downloadPage.data.match(/https:\/\/[^"'\s]+\.apk/i);
+      const linkMatch = downloadPage.data.match(/https:\/\/dw\.uptodown\.com\/[^"'\s<>]+/i);
       if (linkMatch) {
         downloadUrl = linkMatch[0];
       }
     }
     
-    if (downloadUrl) {
+    if (!downloadUrl) {
+      const apkMatch = downloadPage.data.match(/https:\/\/[^"'\s<>]+\.apk[^"'\s<>]*/i);
+      if (apkMatch) {
+        downloadUrl = apkMatch[0];
+      }
+    }
+    
+    if (downloadUrl && downloadUrl.startsWith('http')) {
       console.log('[Uptodown] تم العثور على رابط التحميل');
       return { url: downloadUrl, fileType: 'apk' };
     }
@@ -766,17 +801,45 @@ async function downloadAndSend(sock, sender, url, appName, version, fileType = '
 
   const actualFileType = getFileExtension(url, null) || fileType;
   const displayName = `${cleanName}_${version}.${actualFileType}`;
+  const filePath = path.join(DOWNLOADS_DIR, displayName);
 
-  console.log(`جاري إرسال: ${displayName}`);
+  console.log(`جاري تحميل: ${displayName}`);
 
   try {
+    const response = await axios({
+      method: 'GET',
+      url: url,
+      responseType: 'arraybuffer',
+      timeout: 120000,
+      maxContentLength: 500 * 1024 * 1024,
+      headers: {
+        'User-Agent': getRandomUserAgent(),
+        'Accept': '*/*',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+      }
+    });
+
+    if (!response.data || response.data.length < 1000) {
+      throw new Error('الملف المحمل صغير جداً أو فارغ');
+    }
+
+    fs.writeFileSync(filePath, response.data);
+    console.log(`تم التحميل: ${displayName} (${(response.data.length / 1024 / 1024).toFixed(2)} MB)`);
+
+    console.log(`جاري إرسال: ${displayName}`);
+    
     await sock.sendMessage(sender, {
-      document: { url: url },
+      document: fs.readFileSync(filePath),
       fileName: displayName,
       mimetype: getMimeType(actualFileType)
     });
 
     console.log(`تم الإرسال: ${displayName}`);
+
+    try {
+      fs.unlinkSync(filePath);
+    } catch (e) {}
 
     await sock.sendMessage(sender, {
       text: '📱 تابعني على انستجرام من فضلك\nhttps://www.instagram.com/omarxarafp'
@@ -787,8 +850,34 @@ async function downloadAndSend(sock, sender, url, appName, version, fileType = '
       fileName: displayName,
       fileType: actualFileType
     };
-  } catch (sendErr) {
-    throw new Error(`خطأ في الإرسال: ${sendErr.message}`);
+  } catch (downloadErr) {
+    try {
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    } catch (e) {}
+    
+    console.log(`فشل التحميل المحلي، جاري المحاولة المباشرة...`);
+    
+    try {
+      await sock.sendMessage(sender, {
+        document: { url: url },
+        fileName: displayName,
+        mimetype: getMimeType(actualFileType)
+      });
+
+      console.log(`تم الإرسال مباشرة: ${displayName}`);
+
+      await sock.sendMessage(sender, {
+        text: '📱 تابعني على انستجرام من فضلك\nhttps://www.instagram.com/omarxarafp'
+      });
+
+      return {
+        success: true,
+        fileName: displayName,
+        fileType: actualFileType
+      };
+    } catch (directErr) {
+      throw new Error(`خطأ في الإرسال: ${directErr.message}`);
+    }
   }
 }
 
