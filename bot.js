@@ -360,49 +360,63 @@ async function getDownloadInfo(appId, appName) {
       .replace(/-+/g, '-')
       .trim();
 
-    const pageUrl = `https://apkcombo.com/${slug}/${appId}/download/apk`;
-    console.log(`جاري فتح صفحة: ${pageUrl}`);
-    
-    const pageResponse = await axiosRetry(pageUrl, { timeout: 20000 });
-    const $ = cheerio.load(pageResponse.data);
+    const formats = [
+      { path: 'xapk', type: 'xapk', name: 'XAPK' },
+      { path: 'apk', type: 'apk', name: 'APK' },
+      { path: 'apk-obb', type: 'apk', name: 'APK+OBB' },
+      { path: 'apkm', type: 'apkm', name: 'APKM' },
+    ];
 
-    let downloadUrl = null;
-    let fileType = 'apk';
+    for (const format of formats) {
+      try {
+        const pageUrl = `https://apkcombo.com/${slug}/${appId}/download/${format.path}`;
+        console.log(`[${format.name}] جاري فتح: ${pageUrl}`);
+        
+        const pageResponse = await axiosRetry(pageUrl, { timeout: 20000 });
+        const $ = cheerio.load(pageResponse.data);
 
-    $('a').each((i, el) => {
-      const href = $(el).attr('href') || '';
-      if (href.includes('/r2?u=') && !downloadUrl) {
-        const encodedUrl = href.split('/r2?u=')[1];
-        if (encodedUrl) {
-          downloadUrl = decodeURIComponent(encodedUrl);
-          
-          if (downloadUrl.includes('.xapk') || downloadUrl.includes('xapk-package')) {
-            fileType = 'xapk';
-          } else if (downloadUrl.includes('.apks')) {
-            fileType = 'apks';
+        let downloadUrl = null;
+        let fileType = format.type;
+
+        $('a').each((i, el) => {
+          const href = $(el).attr('href') || '';
+          if (href.includes('/r2?u=') && !downloadUrl) {
+            const encodedUrl = href.split('/r2?u=')[1];
+            if (encodedUrl) {
+              downloadUrl = decodeURIComponent(encodedUrl);
+              
+              if (downloadUrl.includes('.xapk')) fileType = 'xapk';
+              else if (downloadUrl.includes('.apks')) fileType = 'apks';
+              else if (downloadUrl.includes('.apkm')) fileType = 'apkm';
+              else if (downloadUrl.includes('.obb')) fileType = 'apk';
+              
+              return false;
+            }
           }
-          
-          console.log(`تم العثور على رابط R2 CDN (${fileType})`);
-          return false;
+        });
+
+        if (!downloadUrl) {
+          const r2Match = pageResponse.data.match(/\/r2\?u=([^"'\s]+)/);
+          if (r2Match) {
+            downloadUrl = decodeURIComponent(r2Match[1]);
+            if (downloadUrl.includes('.xapk')) fileType = 'xapk';
+            else if (downloadUrl.includes('.apks')) fileType = 'apks';
+            else if (downloadUrl.includes('.apkm')) fileType = 'apkm';
+          }
         }
-      }
-    });
 
-    if (!downloadUrl) {
-      const r2Match = pageResponse.data.match(/\/r2\?u=([^"'\s]+)/);
-      if (r2Match) {
-        downloadUrl = decodeURIComponent(r2Match[1]);
-        if (downloadUrl.includes('.xapk')) fileType = 'xapk';
-        else if (downloadUrl.includes('.apks')) fileType = 'apks';
-        console.log(`تم العثور على رابط R2 CDN من regex (${fileType})`);
+        if (downloadUrl) {
+          console.log(`✅ [${format.name}] تم العثور على رابط (${fileType})`);
+          return { url: downloadUrl, fileType };
+        }
+        
+        console.log(`[${format.name}] لم يتم العثور على رابط`);
+      } catch (err) {
+        console.log(`[${format.name}] خطأ: ${err.message}`);
       }
     }
 
-    if (downloadUrl) {
-      return { url: downloadUrl, fileType };
-    }
-
-    console.log('لم يتم العثور على رابط R2، جاري تجربة الطريقة البديلة...');
+    console.log('لم يتم العثور على رابط، جاري تجربة الطريقة البديلة...');
     return await getDownloadInfoAlt(appId, slug);
 
   } catch (error) {
